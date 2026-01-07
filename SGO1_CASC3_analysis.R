@@ -18,7 +18,7 @@ library(minfi)
 library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
 
 # 2. GSE153873: MICROGLIA DIFFERENTIAL EXPRESSION (from precomputed Excel)
-degs_raw <- read.xlsx("GSE153873_AD.vs.Old_diff.genes.xlsx", rowNames=FALSE)
+degs_raw <- read_excel("GSE153873/GSE153873_AD.vs.Old_diff.genes.xlsx")
 colnames(degs_raw)[1] <- "symbol"
 colnames(degs_raw)[6] <- "FDR"
 
@@ -48,89 +48,147 @@ fit <- lmFit(beta, design)
 fit2 <- contrasts.fit(fit, cont_matrix)
 fit2 <- eBayes(fit2)
 dmp_top <- topTable(fit2, coef=1, number=Inf, adjust.method="fdr")
+# =====================================================
+# ANOTACIÓN 450K - MÉTODO ESTABLE (SIN ERRORES S4)
+# =====================================================
+
+# 1. DMPs significativos
 dmp_sig <- dmp_top[dmp_top$adj.P.Val < 0.05, ]
+cat("✅ DMPs significativos:", nrow(dmp_sig), "\n")
 
-cat("✅ GSE109887: ", nrow(dmp_sig), "significant DMPs in MTG cortex\n")
-write.csv(dmp_sig, "Table2_DMPs_MTG.csv", row.names=TRUE)
+# 2. ANOTACIÓN CORRECTA (método data.frame)
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
 
-# 4. GENE-LEVEL ANNOTATION (450K array)
-ann450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
-probe_ann <- ann450k[rownames(dmp_sig), ]
-dmp_sig$SYMBOL <- probe_ann$UCSC_RefGene_name
+# Cargar anotación como DATA.FRAME (evita error S4)
+anno_450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
 
-# Aggregate to gene level (mean logFC)
+# Convertir a data.frame legible
+anno_df <- as.data.frame(anno_450k)
+rownames(anno_df) <- anno_450k$Name
+
+# Corregir nombres de probes 450K (puntos → guiones)
+rownames(dmp_sig) <- gsub("\\.", "-", rownames(dmp_sig))
+
+# Mapear SYMBOL
+dmp_sig$SYMBOL <- anno_df[rownames(dmp_sig), "UCSC_RefGene_Name"]
+
+# Limpiar SYMBOL
+dmp_sig$SYMBOL <- sapply(strsplit(dmp_sig$SYMBOL, ";"), `[`, 1)
+dmp_sig$SYMBOL[is.na(dmp_sig$SYMBOL) | dmp_sig$SYMBOL == ""] <- "NA"
+
+cat("✅ SYMBOL asignados:", sum(dmp_sig$SYMBOL != "NA", na.rm=TRUE), "/", nrow(dmp_sig), "\n")
+
+# 3. EXPORTAR Table2
+table2_final <- dmp_sig[, c("logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B", "SYMBOL")]
+colnames(table2_final)[1:6] <- c("logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")
+write.csv(table2_final, "Table2_DMPs_MTG.csv", row.names=TRUE)
+
+# DEBUG ANOTACIÓN
+head(rownames(dmp_sig))  # Probes ej "cg00000108"
+head(rownames(anno_df))  # ¿Match?
+sum(rownames(dmp_sig) %in% rownames(anno_df))  # Conteo match
+
+# FIX 1: Fuerza match con Name col
+dmp_sig$probeID <- rownames(dmp_sig)
+anno_match <- anno_df[match(dmp_sig$probeID, anno_df$Name), "UCSC_RefGene_Name"]
+dmp_sig$SYMBOL <- sapply(strsplit(anno_match, ";"), `[`, 1)
+dmp_sig$SYMBOL[is.na(dmp_sig$SYMBOL) | dmp_sig$SYMBOL == "" | dmp_sig$SYMBOL == "c"] <- "NA"  # 'c' común en 450K
+
+cat("FIXED SYMBOLs:", sum(dmp_sig$SYMBOL != "NA"), "/", nrow(dmp_sig), "\n")
+cat("CASC3 probes:", sum(dmp_sig$SYMBOL == "CASC3"), "\n")
+
+# Table2 con SYMBOL FIXED
+table2_final <- dmp_sig[, c("logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B", "SYMBOL")]
+write.csv(table2_final, "Table2_DMPs_MTG_fixed.csv", row.names=TRUE)
+# =====================================================
+# ANOTACIÓN 450K CORRECTA - PROBES YA ANOTADOS
+# =====================================================
+
+# 1. DMPs sig (ya con SYMBOL en rownames)
+dmp_sig <- dmp_top[dmp_top$adj.P.Val < 0.05, ]
+cat("✅ DMPs:", nrow(dmp_sig), "\n")
+
+# 2. ANOTACIÓN: rownames(dmp_sig) = SYMBOL directo
+dmp_sig$SYMBOL <- rownames(dmp_sig)  # ¡Ya son genes!
+dmp_sig$probeID <- rownames(dmp_sig)  # Backup probe
+
+# 3. Carga annotation para chr/pos (opcional, mejora Table3)
+anno_450k <- getAnnotation(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+anno_df <- as.data.frame(anno_450k)
+
+# Match SYMBOL a probe info (muchos probes → 1 gen)
+probe_info <- anno_df[match(rownames(dmp_sig), anno_df$UCSC_RefGene_Name), 
+                      c("chr", "pos", "UCSC_RefGene_Group")]
+
+dmp_sig$chr <- probe_info$chr
+dmp_sig$pos <- probe_info$pos  
+dmp_sig$region <- probe_info$UCSC_RefGene_Group
+
+cat("✅ Genes únicos:", length(unique(dmp_sig$SYMBOL[!is.na(dmp_sig$SYMBOL)])), "\n")
+
+# 4. Table2 EXPORT (SYMBOL + chr/pos)
+table2_final <- dmp_sig[, c("SYMBOL", "probeID", "chr", "pos", "region", 
+                            "logFC", "AveExpr", "t", "P.Value", "adj.P.Val", "B")]
+write.csv(table2_final, "Table2_DMPs_MTG.csv", row.names=FALSE)
+
+head(table2_final)  # Ver HSPB3 etc.
+
+
+# =========================================
+# 5. GENE-LEVEL AGGREGATION (Table 3 FIJA)
+# =========================================
 dmp_genes <- dmp_sig %>%
-  filter(!is.na(SYMBOL) & SYMBOL != "") %>%
+  filter(!is.na(SYMBOL) & SYMBOL != "NA") %>%  
   group_by(SYMBOL) %>%
   summarise(
-    mean_logFC = mean(logFC), 
-    n_probes = n(),
-    .groups = "drop"
+    nprobes = n(),
+    meanlogFC = mean(logFC, na.rm=TRUE),
+    minadjP = min(adj.P.Val, na.rm=TRUE),
+    meanB = mean(B, na.rm=TRUE),
+    .groups = 'drop'
   ) %>%
-  filter(!is.na(mean_logFC))
-
-print("Top 10 MTG genes by |logFC|:")
-print(head(dmp_genes[order(abs(dmp_genes$mean_logFC), decreasing=TRUE), ], 10))
-print("CASC3 (MTG):"); print(dmp_genes[dmp_genes$SYMBOL=="CASC3", ])
+  arrange(minadjP) %>%
+  filter(minadjP < 0.05)  # Solo FDR<0.05
 
 write.csv(dmp_genes, "Table3_DMPs_gene_level.csv", row.names=FALSE)
+casc3_row <- dmp_genes[dmp_genes$SYMBOL=="CASC3", ]
+casc3_fc <- round(as.numeric(casc3_row$meanlogFC), 3)
+casc3_fdr <- sprintf("%.3f", as.numeric(casc3_row$minadjP))
+cat(sprintf("Manuscript: CASC3 MTG (logFC = %.2f, FDR = %.3f)", casc3_fc, as.numeric(casc3_fdr)))
+cat("✅ Table3:", nrow(dmp_genes), "genes\n")
+cat("🎉 CASC3: logFC =", casc3_fc, "| FDR =", casc3_fdr, "| nprobes =", casc3_row$nprobes, "\n")
 
-# 5. FIGURE 1: VOLCANO PLOT (microglia DEGs)
-volcano_data <- degs_raw %>%
-  mutate(
-    logFC = `RA-RO`, 
-    neg_logP = -log10(`PRA-RO`),
-    sig = case_when(
-      FDR < 0.05 & abs(`RA-RO`) > 1 ~ "FDR<0.05 + |logFC|>1",
-      FDR < 0.05 ~ "FDR<0.05", 
-      TRUE ~ "NS"
-    )
-  )
 
-p1 <- ggplot(volcano_data, aes(x=logFC, y=neg_logP, color=sig)) +
-  geom_point(alpha=0.7, size=1) +
-  geom_hline(yintercept=-log10(0.05), linetype="dashed", color="blue", alpha=0.7) +
-  geom_vline(xintercept=c(-1,1), linetype="dashed", color="blue", alpha=0.7) +
-  scale_color_manual(values=c("FDR<0.05 + |logFC|>1"="red", 
-                              "FDR<0.05"="orange", 
-                              "NS"="grey")) +
-  theme_minimal(base_size=12) +
-  labs(
-    title="GSE153873: AD Microglia DEGs",
-    subtitle=paste0("SGO1 top-hit (logFC=", sgo1_micro$`RA-RO`, ") | n=", nrow(degs_microglia), " FDR<0.05"),
-    x="log2 Fold Change (AD vs Aged Control)", 
-    y="-log10(p-value)"
-  ) +
-  theme(legend.position="bottom", legend.title=element_blank())
 
-ggsave("Fig1_Volcano_microglia.pdf", p1, width=9, height=6, dpi=300)
-print(p1)
+# =========================================
+# 6. SUPPLEMENTARY TABLES
+# =========================================
+# Supp Table S1: ALL probes FDR<0.05
+write.csv(dmp_sig[, c("logFC","AveExpr","t","P.Value","adj.P.Val","B","SYMBOL")], 
+          "Supp_Table_S1_DMPs_probes.csv", row.names=TRUE)
 
-# 6. FIGURE 2: CASC3 REPLICATION BARPLOT
+# Supp Table S2: ALL genes FDR<0.05
+write.csv(dmp_genes, "Supp_Table_S2_DMPs_genes.csv", row.names=FALSE)
+
+# =========================================
+# 7. FIGURE 2 FINAL (con valores exactos)
+# =========================================
+casc3_mtg <- dmp_genes[dmp_genes$SYMBOL=="CASC3", ]
 casc3_data <- data.frame(
-  Tissue = c("Microglia (GSE153873)", "MTG Cortex (GSE109887)"),
-  logFC = c(casc3_micro$`RA-RO`, dmp_genes[dmp_genes$SYMBOL=="CASC3", "mean_logFC"]),
-  FDR = c(casc3_micro$FDR, dmp_genes[dmp_genes$SYMBOL=="CASC3", "mean_logFC"])
+  Tissue = c("Microglia", "MTG Cortex"),
+  logFC = c(casc3_micro$`RA-RO`, casc3_mtg$meanlogFC),
+  FDR = c(casc3_micro$FDR, casc3_mtg$minadjP)
 )
 
-p2 <- ggplot(casc3_data, aes(x=Tissue, y=logFC, fill=Tissue)) +
-  geom_col(alpha=0.8, color="black") +
-  geom_text(aes(label=sprintf("FDR=%.3f", FDR)), vjust=-0.5) +
-  theme_minimal(base_size=12) +
-  labs(title="CASC3 Dysregulation: Microglia → Cortex Replication",
-       x="", y="log2 Fold Change (AD vs Control)") +
-  theme(legend.position="none")
+p2 <- ggplot(casc3_data, aes(Tissue, logFC, fill=Tissue)) +
+  geom_col(width=0.6, color="black") +
+  geom_text(aes(label=sprintf("FDR=%.3f\nlogFC=%.2f", FDR, logFC)), 
+            vjust=-0.5, size=4) +
+  labs(title="CASC3 Replication: Microglia → MTG Cortex", 
+       subtitle=paste("n_probes MTG =", casc3_mtg$nprobes),
+       x="", y="logFC (AD-Control)") +
+  theme_minimal() + theme(legend.position="none")
 
-ggsave("Fig2_CASC3_replication.pdf", p2, width=8, height=6, dpi=300)
-print(p2)
+ggsave("Fig2_CASC3_replication.pdf", p2, width=8, height=5)
 
-# SUMMARY FOR METHODS SECTION
-cat("\n🎉 ANALYSIS COMPLETE - medRxiv Supplementary Files Ready!\n")
-cat("Generated files:\n")
-print(list.files(pattern="^(Table|Fig).*"))
-cat("\nMethods values for manuscript:\n")
-cat("- Microglia DEGs (GSE153873):", nrow(degs_microglia), "\n")
-cat("- SGO1:", sgo1_micro$symbol, "logFC =", sgo1_micro$`RA-RO`, "FDR =", sgo1_micro$FDR, "\n")
-cat("- CASC3 (microglia): logFC =", casc3_micro$`RA-RO`, "FDR =", casc3_micro$FDR, "\n")
-cat("- MTG DMPs (GSE109887):", nrow(dmp_sig), "\n")
-cat("- CASC3 (MTG): logFC =", dmp_genes[dmp_genes$SYMBOL=="CASC3", "mean_logFC"], "\n")
+cat("🎉 COMPLETO! Push: git add .; git commit -m 'Table3 fixed + Supps'; git push\n")
